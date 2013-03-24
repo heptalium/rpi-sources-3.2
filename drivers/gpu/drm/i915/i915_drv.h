@@ -374,6 +374,8 @@ typedef struct drm_i915_private {
 	unsigned int lvds_use_ssc:1;
 	unsigned int display_clock_mode:1;
 	int lvds_ssc_freq;
+	unsigned int bios_lvds_val; /* initial [PCH_]LVDS reg val in VBIOS */
+	unsigned int lvds_val; /* used for checking LVDS channel mode */
 	struct {
 		int rate;
 		int lanes;
@@ -1170,12 +1172,7 @@ i915_seqno_passed(uint32_t seq1, uint32_t seq2)
 	return (int32_t)(seq1 - seq2) >= 0;
 }
 
-static inline u32
-i915_gem_next_request_seqno(struct intel_ring_buffer *ring)
-{
-	drm_i915_private_t *dev_priv = ring->dev->dev_private;
-	return ring->outstanding_lazy_request = dev_priv->next_seqno;
-}
+u32 i915_gem_next_request_seqno(struct intel_ring_buffer *ring);
 
 int __must_check i915_gem_object_get_fence(struct drm_i915_gem_object *obj,
 					   struct intel_ring_buffer *pipelined);
@@ -1308,6 +1305,7 @@ static inline void intel_unregister_dsm_handler(void) { return; }
 #endif /* CONFIG_ACPI */
 
 /* modesetting */
+extern void i915_redisable_vga(struct drm_device *dev);
 extern void intel_modeset_init(struct drm_device *dev);
 extern void intel_modeset_gem_init(struct drm_device *dev);
 extern void intel_modeset_cleanup(struct drm_device *dev);
