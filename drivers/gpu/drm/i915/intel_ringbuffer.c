@@ -52,20 +52,6 @@ static inline int ring_space(struct intel_ring_buffer *ring)
 	return space;
 }
 
-static u32 i915_gem_get_seqno(struct drm_device *dev)
-{
-	drm_i915_private_t *dev_priv = dev->dev_private;
-	u32 seqno;
-
-	seqno = dev_priv->next_seqno;
-
-	/* reserve 0 for non-seqno */
-	if (++dev_priv->next_seqno == 0)
-		dev_priv->next_seqno = 1;
-
-	return seqno;
-}
-
 static int
 render_ring_flush(struct intel_ring_buffer *ring,
 		  u32	invalidate_domains,
@@ -277,8 +263,6 @@ static int init_ring_common(struct intel_ring_buffer *ring)
 	I915_WRITE_HEAD(ring, 0);
 	ring->write_tail(ring, 0);
 
-	/* Initialize the ring. */
-	I915_WRITE_START(ring, obj->gtt_offset);
 	head = I915_READ_HEAD(ring) & HEAD_ADDR;
 
 	/* G45 ring initialization fails to reset head to zero */
@@ -304,14 +288,19 @@ static int init_ring_common(struct intel_ring_buffer *ring)
 		}
 	}
 
+	/* Initialize the ring. This must happen _after_ we've cleared the ring
+	 * registers with the above sequence (the readback of the HEAD registers
+	 * also enforces ordering), otherwise the hw might lose the new ring
+	 * register values. */
+	I915_WRITE_START(ring, obj->gtt_offset);
 	I915_WRITE_CTL(ring,
 			((ring->size - PAGE_SIZE) & RING_NR_PAGES)
 			| RING_VALID);
 
 	/* If the head is still not zero, the ring is dead */
-	if ((I915_READ_CTL(ring) & RING_VALID) == 0 ||
-	    I915_READ_START(ring) != obj->gtt_offset ||
-	    (I915_READ_HEAD(ring) & HEAD_ADDR) != 0) {
+	if (wait_for((I915_READ_CTL(ring) & RING_VALID) != 0 &&
+		     I915_READ_START(ring) == obj->gtt_offset &&
+		     (I915_READ_HEAD(ring) & HEAD_ADDR) == 0, 50)) {
 		DRM_ERROR("%s initialization failed "
 				"ctl %08x head %08x tail %08x start %08x\n",
 				ring->name,
@@ -409,14 +398,25 @@ static int init_render_ring(struct intel_ring_buffer *ring)
 
 	if (INTEL_INFO(dev)->gen > 3) {
 		int mode = VS_TIMER_DISPATCH << 16 | VS_TIMER_DISPATCH;
-		if (IS_GEN6(dev) || IS_GEN7(dev))
-			mode |= MI_FLUSH_ENABLE << 16 | MI_FLUSH_ENABLE;
 		I915_WRITE(MI_MODE, mode);
-		if (IS_GEN7(dev))
-			I915_WRITE(GFX_MODE_GEN7,
-				   GFX_MODE_DISABLE(GFX_TLB_INVALIDATE_ALWAYS) |
-				   GFX_MODE_ENABLE(GFX_REPLAY_MODE));
 	}
+
+	/* We need to disable the AsyncFlip performance optimisations in order
+	 * to use MI_WAIT_FOR_EVENT within the CS. It should already be
+	 * programmed to '1' on all products.
+	 */
+	if (INTEL_INFO(dev)->gen >= 6)
+		I915_WRITE(MI_MODE, GFX_MODE_ENABLE(ASYNC_FLIP_PERF_DISABLE));
+
+	/* Required for the hardware to program scanline values for waiting */
+	if (INTEL_INFO(dev)->gen == 6)
+		I915_WRITE(GFX_MODE,
+			   GFX_MODE_ENABLE(GFX_TLB_INVALIDATE_ALWAYS));
+
+	if (IS_GEN7(dev))
+		I915_WRITE(GFX_MODE_GEN7,
+			   GFX_MODE_DISABLE(GFX_TLB_INVALIDATE_ALWAYS) |
+			   GFX_MODE_ENABLE(GFX_REPLAY_MODE));
 
 	if (INTEL_INFO(dev)->gen >= 5) {
 		ret = init_pipe_control(ring);
@@ -488,7 +488,7 @@ gen6_add_request(struct intel_ring_buffer *ring,
 	mbox1_reg = ring->signal_mbox[0];
 	mbox2_reg = ring->signal_mbox[1];
 
-	*seqno = i915_gem_get_seqno(ring->dev);
+	*seqno = i915_gem_next_request_seqno(ring);
 
 	update_mboxes(ring, *seqno, mbox1_reg);
 	update_mboxes(ring, *seqno, mbox2_reg);
@@ -586,8 +586,7 @@ static int
 pc_render_add_request(struct intel_ring_buffer *ring,
 		      u32 *result)
 {
-	struct drm_device *dev = ring->dev;
-	u32 seqno = i915_gem_get_seqno(dev);
+	u32 seqno = i915_gem_next_request_seqno(ring);
 	struct pipe_control *pc = ring->private;
 	u32 scratch_addr = pc->gtt_offset + 128;
 	int ret;
@@ -638,8 +637,7 @@ static int
 render_ring_add_request(struct intel_ring_buffer *ring,
 			u32 *result)
 {
-	struct drm_device *dev = ring->dev;
-	u32 seqno = i915_gem_get_seqno(dev);
+	u32 seqno = i915_gem_next_request_seqno(ring);
 	int ret;
 
 	ret = intel_ring_begin(ring, 4);
@@ -813,7 +811,7 @@ ring_add_request(struct intel_ring_buffer *ring,
 	if (ret)
 		return ret;
 
-	seqno = i915_gem_get_seqno(ring->dev);
+	seqno = i915_gem_next_request_seqno(ring);
 
 	intel_ring_emit(ring, MI_STORE_DWORD_INDEX);
 	intel_ring_emit(ring, I915_GEM_HWS_INDEX << MI_STORE_DWORD_INDEX_SHIFT);
